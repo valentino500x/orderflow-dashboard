@@ -42,6 +42,15 @@
   #infobar b{color:var(--ink);font-weight:600}
   #infobar .pos{color:var(--up)} #infobar .neg{color:var(--down)}
 
+  #alertBell{background:var(--panel2);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:5px 9px;font-size:13px;cursor:pointer;line-height:1}
+  #alertBell.on{color:var(--warn);border-color:var(--warn)}
+  #toasts{position:absolute;top:10px;right:84px;display:flex;flex-direction:column;gap:6px;z-index:5;pointer-events:none;max-width:min(300px,70vw)}
+  .toast{background:rgba(21,26,35,.96);border:1px solid var(--border);border-left:3px solid var(--buy);border-radius:7px;padding:7px 10px;font-size:11.5px;color:var(--ink);box-shadow:0 4px 14px rgba(0,0,0,.45);animation:tin .18s ease-out}
+  .toast.sell{border-left-color:var(--sell)}
+  .toast small{display:block;color:var(--muted);font-size:10px;margin-top:1px}
+  @keyframes tin{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+  @media (prefers-reduced-motion:reduce){.toast{animation:none}}
+
   #wrap{flex:1;position:relative;min-height:0}
   canvas{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:crosshair}
 
@@ -67,6 +76,16 @@
     <label for="profTgl" style="font-size:11px;color:var(--muted)">Profile</label>
     <input type="checkbox" id="profTgl" checked>
   </div>
+  <div class="group">
+    <button id="alertBell" title="Attiva/disattiva alert (suono + notifiche)">🔔</button>
+    <select id="dSel" class="mono" title="Alert delta: soglia vs media ultime 50 barre">
+      <option value="0">Δ off</option><option value="2">Δ &gt;2×</option>
+      <option value="3" selected>Δ &gt;3×</option><option value="5">Δ &gt;5×</option>
+    </select>
+    <select id="imbSel" class="mono" title="Alert imbalance: livelli consecutivi ≥3× sullo stesso lato">
+      <option value="0">Imb off</option><option value="3" selected>Imb ≥3</option><option value="4">Imb ≥4</option>
+    </select>
+  </div>
   <button id="followBtn">⇥ Live</button>
   <div id="status"><span id="dot"></span><span id="statusTxt">CONNESSIONE…</span></div>
   <div id="lastPrice" class="mono">—</div>
@@ -75,6 +94,7 @@
 <div id="wrap">
   <canvas id="chart"></canvas>
   <div id="progress" class="mono"></div>
+  <div id="toasts"></div>
 </div>
 <div id="hint">Rotella: zoom · Trascina: pan · Doppio clic: reset · Footprint: celle sell×buy per livello, bordo = POC barra · Dati: Binance (pubblici) · Nessun consiglio finanziario</div>
 
@@ -84,6 +104,9 @@
 /* ============================== CONFIG ============================== */
 const REST_HOSTS = ['https://data-api.binance.vision', 'https://api.binance.com', 'https://api1.binance.com'];
 const WS_HOSTS   = ['wss://data-stream.binance.vision', 'wss://stream.binance.com:9443'];
+const FAPI       = 'https://fapi.binance.com';           // USD-M futures (open interest)
+const OI_PERIOD  = {'1m':'5m','5m':'5m','15m':'15m','1h':'1h','4h':'4h','1d':'1d'};
+const OI_POLL_MS = 30e3;
 
 // sub = finer interval used to synthesize historical footprints (1 kline row -> 1 price sample).
 const TFS = [
@@ -125,6 +148,9 @@ const S = {
   gen:0, ws:null, wsTries:0, host:null,
   statusKind:'conn', statusMsg:'CONNESSIONE…',
   pricePrec:1,
+  hasOI:false, oiNow:null,        // futures open interest (quote value)
+  alertsOn:false, deltaMult:3, imbStack:3,
+  avgAbsDelta:0, audio:null, lastAlertCheck:0,
 };
 
 /* ============================== UTILS ============================== */
@@ -166,7 +192,7 @@ function parseKline(k){ // quote-asset volumes: k[7]=quoteVol, k[10]=takerBuyQuo
 async function loadAll(){
   const gen=++S.gen;
   closeWS();
-  S.candles=[];S.daily=null;S.follow=true;S.rightOff=0.5;
+  S.candles=[];S.daily=null;S.follow=true;S.rightOff=0.5;S.hasOI=false;S.oiNow=null;
   setStatus('conn','CARICO '+S.symbol+'…');$('ohlc').textContent='Caricamento dati…';
   render();
   try{
@@ -182,7 +208,9 @@ async function loadAll(){
     if(ds.length>=2){const p=ds[ds.length-2],cur=ds[ds.length-1];
       S.daily={pdh:+p[2],pdl:+p[3],pdc:+p[4],dayOpen:+cur[1],dayStart:cur[0]};}
     rebuildTickSelect(last.c);
+    recomputeAvgDelta();
     setStatus('conn','FOOTPRINT…');render();
+    loadOpenInterest(gen);
     backfillFootprints(gen).then(()=>{if(gen===S.gen)openWS(gen);});
   }catch(e){
     if(gen!==S.gen)return;
@@ -239,6 +267,113 @@ function addFp(fp,price,buy,sell){
   if(cell){cell.b+=buy;cell.s+=sell;}else fp.set(key,{b:buy,s:sell});
 }
 
+/* ===================== FUTURES OPEN INTEREST ===================== */
+async function loadOpenInterest(gen){
+  S.hasOI=false;S.oiNow=null;
+  try{
+    const period=OI_PERIOD[S.tf.iv]||'15m';
+    const r=await fetch(`${FAPI}/futures/data/openInterestHist?symbol=${S.symbol}&period=${period}&limit=500`,
+      {signal:AbortSignal.timeout(9000)});
+    if(gen!==S.gen)return;
+    if(!r.ok)throw new Error('no futures');
+    const hist=await r.json();
+    if(gen!==S.gen||!Array.isArray(hist)||!hist.length)return;
+    // each candle takes the last OI point known at its close
+    let j=0;
+    for(const c of S.candles){
+      const end=c.t+S.tf.ms-1;
+      while(j+1<hist.length&&hist[j+1].timestamp<=end)j++;
+      if(hist[j].timestamp<=end)c.oi=+hist[j].sumOpenInterestValue;
+    }
+    S.hasOI=true;
+    pollOI(gen);
+    scheduleRender();
+  }catch(e){/* no futures market for this symbol, or endpoint unreachable: row stays hidden */}
+}
+function pollOI(gen){
+  if(gen!==S.gen)return;
+  setTimeout(async()=>{
+    if(gen!==S.gen)return;
+    try{
+      const r=await fetch(`${FAPI}/fapi/v1/openInterest?symbol=${S.symbol}`,{signal:AbortSignal.timeout(8000)});
+      if(gen!==S.gen)return;
+      const d=await r.json();
+      const last=S.candles[S.candles.length-1];
+      if(d&&d.openInterest&&last){
+        S.oiNow=+d.openInterest*last.c;   // base amount × last price ≈ quote value
+        last.oi=S.oiNow;
+        scheduleRender();
+      }
+    }catch(e){}
+    pollOI(gen);
+  },OI_POLL_MS);
+}
+
+/* ===================== ALERTS (delta / imbalance) ===================== */
+function beep(side){
+  try{
+    if(!S.audio)return;
+    const ctxA=S.audio,o=ctxA.createOscillator(),g=ctxA.createGain();
+    o.frequency.value=side==='buy'?880:440;o.type='sine';
+    g.gain.setValueAtTime(0.0001,ctxA.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.18,ctxA.currentTime+0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001,ctxA.currentTime+0.22);
+    o.connect(g).connect(ctxA.destination);o.start();o.stop(ctxA.currentTime+0.25);
+  }catch(e){}
+}
+function fireAlert(title,detail,side){
+  const box=$('toasts');
+  const t=document.createElement('div');
+  t.className='toast'+(side==='sell'?' sell':'');
+  t.innerHTML=`<b>${title}</b><small>${detail}</small>`;
+  box.prepend(t);
+  while(box.children.length>4)box.lastChild.remove();
+  setTimeout(()=>{t.remove();},12000);
+  beep(side);
+  try{navigator.vibrate&&navigator.vibrate(80);}catch(e){}
+  try{
+    if(typeof Notification!=='undefined'&&Notification.permission==='granted')
+      new Notification(S.symbol+' · '+title,{body:detail});
+  }catch(e){}
+}
+function recomputeAvgDelta(){
+  const n=S.candles.length-1;let sum=0,k=0;
+  for(let i=Math.max(0,n-50);i<n;i++){sum+=Math.abs(S.candles[i].delta||0);k++;}
+  S.avgAbsDelta=k?sum/k:0;
+}
+function checkAlerts(c){
+  if(!S.alertsOn)return;
+  const now=Date.now();
+  if(now-S.lastAlertCheck<500)return;
+  S.lastAlertCheck=now;
+  const hhmm=new Date().toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'});
+  if(S.deltaMult>0&&!c._aD&&S.avgAbsDelta>0&&Math.abs(c.delta)>S.deltaMult*S.avgAbsDelta){
+    c._aD=true;
+    const side=c.delta>=0?'buy':'sell';
+    fireAlert('Delta '+(side==='buy'?'BUY':'SELL')+' '+fmtSign(c.delta),
+      `> ${S.deltaMult}× la media (${fmtV(S.avgAbsDelta)}) · ${S.tf.label} · ${hhmm}`,side);
+  }
+  if(S.imbStack>0&&!c._aI&&c.fp&&c.fp.size){
+    const m=aggFp(c.fp,tickStepValue());
+    const keys=[...m.keys()].sort((a,b)=>a-b);
+    const minVol=c.v*0.005; // ignore dust levels
+    let runB=0,runS=0,bestB=0,bestS=0;
+    for(const k of keys){
+      const cell=m.get(k),tot=cell.b+cell.s;
+      if(tot<minVol){runB=0;runS=0;continue;}
+      runB=(cell.b>=cell.s*IMB_RATIO)?runB+1:0;
+      runS=(cell.s>=cell.b*IMB_RATIO)?runS+1:0;
+      if(runB>bestB)bestB=runB;if(runS>bestS)bestS=runS;
+    }
+    if(bestB>=S.imbStack||bestS>=S.imbStack){
+      c._aI=true;
+      const side=bestB>=bestS?'buy':'sell';
+      fireAlert('Imbalance '+(side==='buy'?'BUY':'SELL')+' ×'+Math.max(bestB,bestS),
+        `${Math.max(bestB,bestS)} livelli consecutivi ≥${IMB_RATIO}× · ${S.tf.label} · ${hhmm}`,side);
+    }
+  }
+}
+
 /* ============================== DATA: WEBSOCKET ============================== */
 function closeWS(){if(S.ws){S.ws.onclose=null;S.ws.close();S.ws=null;}}
 function openWS(gen){
@@ -270,8 +405,9 @@ function liveBar(t){
   const bt=last?last.t+Math.floor((t-last.t)/tf.ms)*tf.ms:t-(t%tf.ms);
   if(!last||t>=last.t+tf.ms){
     const o=last?last.c:0;
-    const nb={t:bt,o,h:o,l:o,c:o,v:0,bv:0,delta:0,dMax:0,dMin:0,fp:new Map(),rows:null,_run:0};
+    const nb={t:bt,o,h:o,l:o,c:o,v:0,bv:0,delta:0,dMax:0,dMin:0,fp:new Map(),rows:null,_run:0,oi:last?last.oi:undefined};
     S.candles.push(nb);
+    recomputeAvgDelta();
     if(S.candles.length>HIST_BARS+tf.cover+50)S.candles.shift();
     if(S.follow)S.rightOff=0.5;
     return nb;
@@ -289,6 +425,7 @@ function onTrade(m){
   else{addFp(c.fp,p,quote,0);c.bv+=quote;c.delta+=quote;c._run=(c._run||0)+quote;}
   if(c._run>(c.dMax||0))c.dMax=c._run;
   if(c._run<(c.dMin||0))c.dMin=c._run;
+  checkAlerts(c);
   scheduleRender();
 }
 function onKline(k){
@@ -322,6 +459,11 @@ function startDemo(gen,err){
     S.candles.push(c);p=cl;t+=tf.ms;
   }
   S.daily={pdh:p+900,pdl:p-1400,pdc:p-300,dayOpen:p-120,dayStart:utcDayStart(now)};
+  // synthetic open interest walk
+  let oi=12.4e9;
+  for(const c of S.candles){oi+=(rnd()-0.48)*60e6;c.oi=oi;}
+  S.hasOI=true;S.oiNow=oi;
+  recomputeAvgDelta();
   rebuildTickSelect(p);
   setStatus('err',err?'OFFLINE · DEMO':'DEMO');
   if(err)$('hint').textContent='⚠ Binance non raggiungibile da questa rete ('+err.message+') — dati sintetici dimostrativi. Apri il file da una rete con accesso a binance.com per i dati live.';
@@ -391,8 +533,9 @@ function vwapSeries(){
 /* ============================== VIEW / LAYOUT ============================== */
 const cv=$('chart'),ctx=cv.getContext('2d');
 let W=0,H=0,DPR=1,renderQueued=false;
-const AX_W=74, TIME_H=20, STAT_ROW=17, STAT_ROWS=['Vol','Δ','Δmax','Δmin','CVD'];
-function statsH(){return STAT_ROW*STAT_ROWS.length}
+const AX_W=74, TIME_H=20, STAT_ROW=17;
+function statRows(){return S.hasOI?['Vol','Δ','Δmax','Δmin','CVD','ΔOI']:['Vol','Δ','Δmax','Δmin','CVD']}
+function statsH(){return STAT_ROW*statRows().length}
 function canvasH(){return H}
 function plotRect(){return {x:0,y:0,w:W-AX_W,h:H-TIME_H-statsH()}}
 function resize(){
@@ -606,12 +749,19 @@ function statCell(v,kind,maxAbs){
   return v>=0?{bg:`rgba(38,166,154,${0.08+a*0.5})`,fg:'#d9f4f0',txt:fmtSign(v)}
              :{bg:`rgba(239,83,80,${0.08+a*0.5})`,fg:'#ffe3e2',txt:fmtSign(v)};
 }
+function oiDelta(i){
+  if(!S.hasOI)return null;
+  const c=S.candles[i],p=S.candles[i-1];
+  if(c===undefined||c.oi===undefined||!p||p.oi===undefined)return null;
+  return c.oi-p.oi;
+}
 function drawStats(P,i0,i1,cvd){
-  const top=P.y+P.h;
-  let maxVol=1,maxD=1,maxCvd=1;
+  const top=P.y+P.h,ROWS=statRows();
+  let maxVol=1,maxD=1,maxCvd=1,maxOi=1;
   for(let i=i0;i<=i1;i++){const c=S.candles[i];
     maxVol=Math.max(maxVol,c.v);maxD=Math.max(maxD,Math.abs(c.delta||0),Math.abs(c.dMax||0),Math.abs(c.dMin||0));
-    maxCvd=Math.max(maxCvd,Math.abs(cvd[i]));}
+    maxCvd=Math.max(maxCvd,Math.abs(cvd[i]));
+    const od=oiDelta(i);if(od!==null)maxOi=Math.max(maxOi,Math.abs(od));}
   ctx.font='600 9.5px ui-monospace,Menlo,monospace';ctx.textBaseline='middle';
   ctx.save();ctx.beginPath();ctx.rect(P.x,top,P.w,statsH());ctx.clip();
   for(let i=i0;i<=i1;i++){
@@ -619,18 +769,19 @@ function drawStats(P,i0,i1,cvd){
     if(x+w<0||x>P.w)continue;
     const vals=[statCell(c.v,'vol',maxVol),statCell(c.delta,'d',maxD),
                 statCell(c.dMax,'d',maxD),statCell(c.dMin,'d',maxD),statCell(cvd[i],'d',maxCvd)];
-    for(let r=0;r<5;r++){
+    if(S.hasOI)vals.push(statCell(oiDelta(i),'d',maxOi));
+    for(let r=0;r<vals.length;r++){
       const y=top+r*STAT_ROW,cell=vals[r];
       ctx.fillStyle=cell.bg;ctx.fillRect(x,y+1,w,STAT_ROW-2);
       if(S.barW>=42){ctx.fillStyle=cell.fg;ctx.textAlign='center';ctx.fillText(cell.txt,x+w/2,y+STAT_ROW/2+0.5);}
     }
   }
   ctx.restore();
-  for(let r=0;r<STAT_ROWS.length;r++){
+  for(let r=0;r<ROWS.length;r++){
     const y=top+r*STAT_ROW;
     ctx.fillStyle='rgba(21,26,35,.95)';ctx.fillRect(P.x+P.w,y,AX_W,STAT_ROW);
     ctx.fillStyle=C.muted;ctx.textAlign='left';
-    ctx.fillText(STAT_ROWS[r],P.x+P.w+6,y+STAT_ROW/2);
+    ctx.fillText(ROWS[r],P.x+P.w+6,y+STAT_ROW/2);
   }
   ctx.strokeStyle=C.axis;ctx.lineWidth=1;
   ctx.beginPath();ctx.moveTo(P.x,Math.round(top)+0.5);ctx.lineTo(W,Math.round(top)+0.5);ctx.stroke();
@@ -690,7 +841,8 @@ function updateInfobar(i0,i1,cvd){
     `L <b class="${cls}">${fmtP(c.l)}</b> C <b class="${cls}">${fmtP(c.c)}</b>&nbsp; `+
     `Vol <b>${fmtV(c.v)}</b> Δ <b class="${(c.delta||0)>=0?'pos':'neg'}">${fmtSign(c.delta||0)}</b> `+
     `Sells <b class="neg">${fmtV(sells)}</b> Buys <b class="pos">${fmtV(buys)}</b> `+
-    `CVD <b class="${cvd[i]>=0?'pos':'neg'}">${fmtSign(cvd[i])}</b>`;
+    `CVD <b class="${cvd[i]>=0?'pos':'neg'}">${fmtSign(cvd[i])}</b>`+
+    (S.hasOI&&c.oi!==undefined?` OI <b>${fmtV(c.oi)}</b>${(()=>{const od=oiDelta(i);return od!==null?` <b class="${od>=0?'pos':'neg'}">${fmtSign(od)}</b>`:''})()}`:'');
   const last=S.candles[S.candles.length-1];
   const lp=$('lastPrice');lp.textContent=fmtP(last.c);
   lp.style.color=last.c>=last.o?'var(--up)':'var(--down)';
@@ -770,6 +922,18 @@ function rebuildTickSelect(price){
 }
 $('tick').onchange=e=>{S.tickStep=+e.target.value;scheduleRender();};
 $('profTgl').onchange=()=>scheduleRender();
+$('alertBell').onclick=()=>{
+  S.alertsOn=!S.alertsOn;
+  $('alertBell').classList.toggle('on',S.alertsOn);
+  if(S.alertsOn){
+    try{S.audio=S.audio||new (window.AudioContext||window.webkitAudioContext)();S.audio.resume&&S.audio.resume();}catch(e){}
+    try{if(typeof Notification!=='undefined'&&Notification.permission==='default')Notification.requestPermission();}catch(e){}
+    recomputeAvgDelta();
+    fireAlert('Alert attivi','Δ > '+(S.deltaMult||'off')+'× media · Imbalance ≥'+(S.imbStack||'off')+' livelli','buy');
+  }
+};
+$('dSel').onchange=e=>{S.deltaMult=+e.target.value;};
+$('imbSel').onchange=e=>{S.imbStack=+e.target.value;};
 $('symbol').addEventListener('keydown',e=>{
   if(e.key==='Enter'){const v=e.target.value.trim().toUpperCase();
     if(v&&v!==S.symbol){S.symbol=v;S.demo=qs.get('demo')==='1';loadAll();}e.target.blur();}

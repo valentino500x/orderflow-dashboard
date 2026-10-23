@@ -19,6 +19,17 @@ apri `index.html` nel browser e si collega alle API pubbliche di Binance
 - Timeframe 1m–1D, crosshair con OHLC/Δ/CVD, zoom (rotella/pinch),
   pan (trascina), doppio clic per reset, pulsante «⇥ Live» per riagganciare
   l'ultimo prezzo.
+- **Open Interest futures** (Binance USD-M): storico per barra + polling
+  live ogni 30 s, riga **ΔOI** nel footer e valore assoluto nell'infobar.
+  La riga compare solo se la coppia ha un mercato futures raggiungibile.
+- **Alert** (campanella 🔔 nella toolbar, da attivare con un tocco):
+  - **Delta**: scatta quando il |delta| della barra live supera 2×/3×/5×
+    la media delle ultime 50 barre;
+  - **Imbalance**: scatta su ≥3 (o ≥4) livelli consecutivi con un lato
+    ≥3× l'altro nella barra live.
+  Ogni alert mostra un toast, suona un beep (tono alto = buy, basso =
+  sell), vibra dove supportato e invia una notifica browser se autorizzata.
+  Un alert per tipo per barra.
 
 ## Parametri URL
 
