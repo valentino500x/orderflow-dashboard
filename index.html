@@ -444,6 +444,7 @@ function render(){
   drawLevels(P,yOf,lo,hi,profile,vwap);
   if(S.mode==='candles')drawCandles(P,i0,i1,yOf,vwap);
   else drawFootprint(P,i0,i1,yOf,step,lo,hi);
+  drawLevelTags(P);
   drawStats(P,i0,i1,cvd);
   drawTimeAxis(P,i0,i1);
   drawPriceAxis(P,lo,hi,yOf);
@@ -547,17 +548,24 @@ function drawProfile(pr,P,yOf,lo,hi){
   }
 }
 
+let levelTags=[]; // tags are collected here and painted after the bars, so text never ends up underneath
 function levelLine(P,y,color,dash,label,yUsed){
   if(y<P.y+4||y>P.y+P.h-4)return;
   for(const u of yUsed)if(Math.abs(u-y)<11)return; // avoid tag collisions
   yUsed.push(y);
   ctx.strokeStyle=color;ctx.lineWidth=1;ctx.setLineDash(dash);
   ctx.beginPath();ctx.moveTo(P.x,Math.round(y)+0.5);ctx.lineTo(P.x+P.w,Math.round(y)+0.5);ctx.stroke();ctx.setLineDash([]);
-  ctx.font='600 9.5px ui-monospace,Menlo,monospace';
-  const tw=ctx.measureText(label).width+8;
-  ctx.fillStyle='rgba(14,17,23,.85)';ctx.fillRect(P.x+P.w-tw-4,y-7,tw,14);
-  ctx.fillStyle=color;ctx.textAlign='right';ctx.textBaseline='middle';
-  ctx.fillText(label,P.x+P.w-8,y+0.5);
+  levelTags.push({y,color,label});
+}
+function drawLevelTags(P){
+  ctx.font='600 9.5px ui-monospace,Menlo,monospace';ctx.textBaseline='middle';
+  for(const t of levelTags){
+    const tw=ctx.measureText(t.label).width+8;
+    ctx.fillStyle='rgba(14,17,23,.92)';ctx.fillRect(P.x+P.w-tw-4,t.y-7,tw,14);
+    ctx.fillStyle=t.color;ctx.textAlign='right';
+    ctx.fillText(t.label,P.x+P.w-8,t.y+0.5);
+  }
+  levelTags=[];
 }
 function drawLevels(P,yOf,lo,hi,profile,vwap){
   const yUsed=[];
