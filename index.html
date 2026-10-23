@@ -444,10 +444,10 @@ function render(){
   drawLevels(P,yOf,lo,hi,profile,vwap);
   if(S.mode==='candles')drawCandles(P,i0,i1,yOf,vwap);
   else drawFootprint(P,i0,i1,yOf,step,lo,hi);
-  drawLastPrice(P,yOf,lo,hi);
   drawStats(P,i0,i1,cvd);
   drawTimeAxis(P,i0,i1);
   drawPriceAxis(P,lo,hi,yOf);
+  drawLastPrice(P,yOf,lo,hi);
   if(S.cross)drawCross(P,yOf,lo,hi,i0,i1,cvd);
   updateInfobar(i0,i1,cvd);
 }
@@ -463,6 +463,7 @@ function drawGrid(P,lo,hi,i0,i1,yOf){
 }
 
 function drawCandles(P,i0,i1,yOf,vwap){
+  ctx.save();ctx.beginPath();ctx.rect(P.x,P.y,P.w,P.h);ctx.clip();
   const bw=Math.max(1,S.barW*0.72);
   for(let i=i0;i<=i1;i++){
     const c=S.candles[i],x=xOf(i),up=c.c>=c.o;
@@ -476,13 +477,17 @@ function drawCandles(P,i0,i1,yOf,vwap){
   let started=false;
   for(let i=i0;i<=i1;i++){const x=xOf(i),y=yOf(vwap[i]);if(!started){ctx.moveTo(x,y);started=true;}else ctx.lineTo(x,y);}
   ctx.stroke();
+  ctx.restore();
 }
 
 function drawFootprint(P,i0,i1,yOf,step,lo,hi){
   const rowH=Math.abs(yOf(lo)-yOf(lo+step));
   const showNum=S.barW>=76&&rowH>=11;
   const half=S.barW/2-2;
-  ctx.font='600 '+Math.min(10.5,rowH-2)+'px ui-monospace,Menlo,monospace';
+  ctx.save();ctx.beginPath();ctx.rect(P.x,P.y,P.w,P.h);ctx.clip();
+  // smaller glyphs on narrow bars so the numbers still fit the half-bar on phones
+  ctx.font='600 '+Math.min(S.barW>=110?10.5:9,rowH-2)+'px ui-monospace,Menlo,monospace';
+  const maxTxtW=half-7; // a number is drawn only if it fits its own half-bar
   for(let i=i0;i<=i1;i++){
     const c=S.candles[i],x=xOf(i);
     if(!c.fp||!c.fp.size){ // no footprint data → slim candle fallback
@@ -513,13 +518,19 @@ function drawFootprint(P,i0,i1,yOf,step,lo,hi){
       if(showNum){
         const imbB=cell.b>=cell.s*IMB_RATIO&&cell.b>0,imbS=cell.s>=cell.b*IMB_RATIO&&cell.s>0;
         const ty=yT+hC/2+0.5;ctx.textBaseline='middle';
-        ctx.textAlign='right';ctx.fillStyle=imbS?C.imbSell:C.sellTxt;
-        ctx.fillText(fmtV(cell.s),x-4,ty);
-        ctx.textAlign='left';ctx.fillStyle=imbB?C.imbBuy:C.buyTxt;
-        ctx.fillText(fmtV(cell.b),x+4,ty);
+        const sTxt=fmtV(cell.s),bTxt=fmtV(cell.b);
+        if(ctx.measureText(sTxt).width<=maxTxtW){
+          ctx.textAlign='right';ctx.fillStyle=imbS?C.imbSell:C.sellTxt;
+          ctx.fillText(sTxt,x-4,ty);
+        }
+        if(ctx.measureText(bTxt).width<=maxTxtW){
+          ctx.textAlign='left';ctx.fillStyle=imbB?C.imbBuy:C.buyTxt;
+          ctx.fillText(bTxt,x+4,ty);
+        }
       }
     }
   }
+  ctx.restore();
 }
 
 function drawProfile(pr,P,yOf,lo,hi){
@@ -592,12 +603,7 @@ function drawStats(P,i0,i1,cvd){
     maxVol=Math.max(maxVol,c.v);maxD=Math.max(maxD,Math.abs(c.delta||0),Math.abs(c.dMax||0),Math.abs(c.dMin||0));
     maxCvd=Math.max(maxCvd,Math.abs(cvd[i]));}
   ctx.font='600 9.5px ui-monospace,Menlo,monospace';ctx.textBaseline='middle';
-  for(let r=0;r<STAT_ROWS.length;r++){
-    const y=top+r*STAT_ROW;
-    ctx.fillStyle='rgba(21,26,35,.9)';ctx.fillRect(P.x+P.w,y,AX_W,STAT_ROW);
-    ctx.fillStyle=C.muted;ctx.textAlign='left';
-    ctx.fillText(STAT_ROWS[r],P.x+P.w+6,y+STAT_ROW/2);
-  }
+  ctx.save();ctx.beginPath();ctx.rect(P.x,top,P.w,statsH());ctx.clip();
   for(let i=i0;i<=i1;i++){
     const c=S.candles[i],x=xOf(i)-S.barW/2+1,w=S.barW-2;
     if(x+w<0||x>P.w)continue;
@@ -608,6 +614,13 @@ function drawStats(P,i0,i1,cvd){
       ctx.fillStyle=cell.bg;ctx.fillRect(x,y+1,w,STAT_ROW-2);
       if(S.barW>=42){ctx.fillStyle=cell.fg;ctx.textAlign='center';ctx.fillText(cell.txt,x+w/2,y+STAT_ROW/2+0.5);}
     }
+  }
+  ctx.restore();
+  for(let r=0;r<STAT_ROWS.length;r++){
+    const y=top+r*STAT_ROW;
+    ctx.fillStyle='rgba(21,26,35,.95)';ctx.fillRect(P.x+P.w,y,AX_W,STAT_ROW);
+    ctx.fillStyle=C.muted;ctx.textAlign='left';
+    ctx.fillText(STAT_ROWS[r],P.x+P.w+6,y+STAT_ROW/2);
   }
   ctx.strokeStyle=C.axis;ctx.lineWidth=1;
   ctx.beginPath();ctx.moveTo(P.x,Math.round(top)+0.5);ctx.lineTo(W,Math.round(top)+0.5);ctx.stroke();
