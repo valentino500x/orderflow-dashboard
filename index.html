@@ -444,10 +444,10 @@ function render(){
   drawLevels(P,yOf,lo,hi,profile,vwap);
   if(S.mode==='candles')drawCandles(P,i0,i1,yOf,vwap);
   else drawFootprint(P,i0,i1,yOf,step,lo,hi);
-  drawLevelTags(P);
   drawStats(P,i0,i1,cvd);
   drawTimeAxis(P,i0,i1);
   drawPriceAxis(P,lo,hi,yOf);
+  drawLevelTags(P);
   drawLastPrice(P,yOf,lo,hi);
   if(S.cross)drawCross(P,yOf,lo,hi,i0,i1,cvd);
   updateInfobar(i0,i1,cvd);
@@ -557,16 +557,18 @@ function levelLine(P,y,color,dash,label,yUsed){
   ctx.beginPath();ctx.moveTo(P.x,Math.round(y)+0.5);ctx.lineTo(P.x+P.w,Math.round(y)+0.5);ctx.stroke();ctx.setLineDash([]);
   levelTags.push({y,color,label});
 }
-function drawLevelTags(P){
-  ctx.font='600 9.5px ui-monospace,Menlo,monospace';ctx.textBaseline='middle';
+function drawLevelTags(P){ // tags live on the price axis, clear of the plot
+  ctx.font='600 9px ui-monospace,Menlo,monospace';ctx.textBaseline='middle';
   for(const t of levelTags){
-    const tw=ctx.measureText(t.label).width+8;
-    ctx.fillStyle='rgba(14,17,23,.92)';ctx.fillRect(P.x+P.w-tw-4,t.y-7,tw,14);
-    ctx.fillStyle=t.color;ctx.textAlign='right';
-    ctx.fillText(t.label,P.x+P.w-8,t.y+0.5);
+    ctx.fillStyle='#161b26';ctx.fillRect(P.x+P.w+1,t.y-7,AX_W-1,14);
+    ctx.strokeStyle=t.color;ctx.lineWidth=1;
+    ctx.beginPath();ctx.moveTo(P.x+P.w+1,t.y-7);ctx.lineTo(P.x+P.w+1,t.y+7);ctx.stroke();
+    ctx.fillStyle=t.color;ctx.textAlign='left';
+    ctx.fillText(t.label,P.x+P.w+5,t.y+0.5);
   }
   levelTags=[];
 }
+const fmtLvl=(name,p)=>name+' '+(p>=1000?Math.round(p).toLocaleString('en-US'):fmtP(p));
 function drawLevels(P,yOf,lo,hi,profile,vwap){
   const yUsed=[];
   if(profile){
@@ -575,14 +577,14 @@ function drawLevels(P,yOf,lo,hi,profile,vwap){
     levelLine(P,yOf(profile.val*profile.step),'#8b93a7',[2,3],'VAL',yUsed);
   }
   if(S.daily){
-    levelLine(P,yOf(S.daily.pdh),'#e8a0a4',[8,4],'PDH '+fmtP(S.daily.pdh),yUsed);
-    levelLine(P,yOf(S.daily.pdl),'#e8a0a4',[8,4],'PDL '+fmtP(S.daily.pdl),yUsed);
-    levelLine(P,yOf(S.daily.pdc),'#9aa4b8',[8,4],'PDC '+fmtP(S.daily.pdc),yUsed);
-    levelLine(P,yOf(S.daily.dayOpen),'#86c7f3',[8,4],'O '+fmtP(S.daily.dayOpen),yUsed);
+    levelLine(P,yOf(S.daily.pdh),'#e8a0a4',[8,4],fmtLvl('PDH',S.daily.pdh),yUsed);
+    levelLine(P,yOf(S.daily.pdl),'#e8a0a4',[8,4],fmtLvl('PDL',S.daily.pdl),yUsed);
+    levelLine(P,yOf(S.daily.pdc),'#9aa4b8',[8,4],fmtLvl('PDC',S.daily.pdc),yUsed);
+    levelLine(P,yOf(S.daily.dayOpen),'#86c7f3',[8,4],fmtLvl('O',S.daily.dayOpen),yUsed);
   }
   if(S.mode==='footprint'&&vwap.length){ // in candle mode the vwap polyline is drawn instead
     const v=vwap[vwap.length-1];
-    levelLine(P,yOf(v),C.vwap,[3,3],'VWAP '+fmtP(v),yUsed);
+    levelLine(P,yOf(v),C.vwap,[3,3],fmtLvl('VWAP',v),yUsed);
   }
 }
 
